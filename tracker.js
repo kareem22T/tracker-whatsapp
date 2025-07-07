@@ -1,5 +1,5 @@
 const venom = require('venom-bot');
-const mysql = require('mysql2/promise');
+const sql = require('mssql');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -11,10 +11,14 @@ let qrCodes = {}; // Must be global
 
 // Database configuration
 const dbConfig = {
-  host: 'localhost',
-  user: 'root',
-  password: 'password',
-  database: 'whatsapp_tracker'
+  user: 'sa',
+  password: '123456',
+  server: 'localhost', // or IP address
+  database: 'whatsapp_tracker',
+  options: {
+    encrypt: false, // set to true if using Azure or SSL
+    trustServerCertificate: true // for local development
+  }
 };
 
 // Create database connection
@@ -28,45 +32,53 @@ if (!fs.existsSync(mediaDir)) {
 
 async function initDatabase() {
   try {
-    db = await mysql.createConnection(dbConfig);
-    console.log('Database connected successfully');
-    
-    // Create messages table with media support
-    await db.execute(`
-        CREATE TABLE IF NOT EXISTS messages (
-          id INT AUTO_INCREMENT PRIMARY KEY,
+    db = await sql.connect(dbConfig);
+    console.log('✅ SQL Server connected successfully');
+
+    // Create messages table
+    await db.request().query(`
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'messages')
+      BEGIN
+        CREATE TABLE messages (
+          id INT IDENTITY(1,1) PRIMARY KEY,
           message_id VARCHAR(255) UNIQUE,
           from_number VARCHAR(50),
           to_number VARCHAR(50),
-          message_body TEXT,
+          message_body NVARCHAR(max),
           message_type VARCHAR(20),
-          is_group BOOLEAN DEFAULT FALSE,
+          is_group BIT DEFAULT 0,
           group_id VARCHAR(100),
-          timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          is_from_me BOOLEAN DEFAULT FALSE,
+          timestamp DATETIME DEFAULT GETDATE(),
+          is_from_me BIT DEFAULT 0,
           message_status VARCHAR(20),
           session_name VARCHAR(255),
           media_url VARCHAR(500),
           media_filename VARCHAR(255),
           media_mimetype VARCHAR(100),
           media_size BIGINT,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+          created_at DATETIME DEFAULT GETDATE()
+        )
+      END
     `);
 
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        session_name VARCHAR(255) UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
+    // Create sessions table
+    await db.request().query(`
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'sessions')
+      BEGIN
+        CREATE TABLE sessions (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          session_name VARCHAR(255) UNIQUE NOT NULL,
+          created_at DATETIME DEFAULT GETDATE()
+        )
+      END
     `);
-    
-    console.log('Messages table ready');
+
+    console.log('✅ Tables ready');
   } catch (error) {
-    console.error('Database connection failed:', error);
+    console.error('❌ Database connection failed:', error);
   }
 }
+
 
 // Function to download and save media
 async function downloadMedia(client, message) {
@@ -136,57 +148,67 @@ function getFileExtension(mimetype) {
 // Enhanced function to save message with media support
 async function saveMessage(client, message, sessionName) {
   try {
+    // Check if message already exists
+    const checkResult = await db.request()
+      .input('message_id', sql.VarChar, message.id)
+      .query('SELECT COUNT(*) as count FROM messages WHERE message_id = @message_id');
+
+    if (checkResult.recordset[0].count > 0) {
+      console.log(`⚠️ Message already exists: ${message.id}`);
+      return; // Skip saving
+    }
+
     let mediaInfo = null;
-    
+
     // Check if message contains media
     const mediaTypes = ['image', 'video', 'audio', 'ptt', 'document', 'sticker'];
     if (mediaTypes.includes(message.type)) {
       mediaInfo = await downloadMedia(client, message);
     }
-    
+
     const query = `
-          INSERT INTO messages (
-            message_id, from_number, to_number, message_body, 
-            message_type, is_group, group_id, is_from_me, message_status,
-            session_name, media_filename, media_mimetype, media_size
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       `;
-    
-      const values = [
-        message.id,
-        message.from,
-        message.to,
-        message.body || message.caption || (mediaInfo ? `[${message.type.toUpperCase()}]` : ''),
-        message.type,
-        message.isGroupMsg,
-        message.isGroupMsg ? message.from : null,
-        message.fromMe,
-        'received',
-        sessionName, // 🔴 Save session name here
-        mediaInfo ? mediaInfo.filename : null,
-        mediaInfo ? mediaInfo.mimetype : null,
-        mediaInfo ? mediaInfo.size : null
-      ];
-    
-    await db.execute(query, values);
+      INSERT INTO messages (
+        message_id, from_number, to_number, message_body, 
+        message_type, is_group, group_id, is_from_me, message_status,
+        session_name, media_filename, media_mimetype, media_size
+      ) VALUES (
+        @message_id, @from_number, @to_number, @message_body, 
+        @message_type, @is_group, @group_id, @is_from_me, @message_status, 
+        @session_name, @media_filename, @media_mimetype, @media_size
+      )
+    `;
+
+    await db.request()
+      .input('message_id', sql.VarChar, message.id)
+      .input('from_number', sql.VarChar, message.from)
+      .input('to_number', sql.VarChar, message.to)
+      .input('message_body', sql.NVarChar(sql.MAX), message.body || message.caption || (mediaInfo ? `[${message.type.toUpperCase()}]` : ''))
+      .input('message_type', sql.VarChar, message.type)
+      .input('is_group', sql.Bit, message.isGroupMsg)
+      .input('group_id', sql.VarChar, message.isGroupMsg ? message.from : null)
+      .input('is_from_me', sql.Bit, message.fromMe)
+      .input('message_status', sql.VarChar, 'received')
+      .input('session_name', sql.VarChar, sessionName)
+      .input('media_filename', sql.VarChar, mediaInfo ? mediaInfo.filename : null)
+      .input('media_mimetype', sql.VarChar, mediaInfo ? mediaInfo.mimetype : null)
+      .input('media_size', sql.BigInt, mediaInfo ? mediaInfo.size : null)
+      .query(query);
+
     console.log(`✅ Message saved: ${message.id} ${mediaInfo ? '(with media)' : ''}`);
-    
+
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
-      console.log('⚠️ Message already exists in database');
-    } else {
-      console.error('❌ Error saving message:', error);
-    }
+    console.error('❌ Error saving message:', error);
   }
 }
 
 // Function to update message status
 async function updateMessageStatus(messageId, status) {
   try {
-    await db.execute(
-      'UPDATE messages SET message_status = ? WHERE message_id = ?',
-      [status, messageId]
-    );
+    await db.request()
+      .input('status', sql.VarChar, status)
+      .input('message_id', sql.VarChar, messageId)
+      .query('UPDATE messages SET message_status = @status WHERE message_id = @message_id');
+
     console.log(`📋 Message ${messageId} status updated to: ${status}`);
   } catch (error) {
     console.error('Error updating message status:', error);
@@ -235,7 +257,8 @@ async function startAgentSession(sessionName) {
 
 async function loadAllAgentSessions() {
   try {
-    const [sessions] = await db.execute('SELECT session_name FROM sessions');
+    const result = await db.request().query('SELECT session_name FROM sessions');
+    const sessions = result.recordset;
 
     if (sessions.length === 0) {
       console.log('⚠️ No sessions found in the database');
@@ -355,7 +378,7 @@ process.on('SIGINT', async () => {
 
     // Close database connection
     if (db) {
-      await db.end();
+      await sql.close();
       console.log('🗄️ Database connection closed.');
     }
 
@@ -379,11 +402,45 @@ async function main() {
   console.log('✅ System is ready and all sessions are running!');
 }
 
+// test api
+function createResponse(success, data = null, message = '', pagination = null) {
+  const response = {
+    success,
+    message,
+    timestamp: new Date().toISOString()
+  };
+
+  if (data !== null) {
+    response.data = data;
+  }
+
+  if (pagination) {
+    response.pagination = pagination;
+  }
+
+  return response;
+}
+
+app.get('/tracker/health', async (req, res) => {
+  try {    
+    
+    res.json("hello from tracker");
+
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json(createResponse(false, error, 'Service unhealthy'));
+  }
+});
+
+
 app.post('/add-session', async (req, res) => {
   const sessionName = `agent_${Date.now()}`;
   
   try {
-    await db.execute('INSERT INTO sessions (session_name) VALUES (?)', [sessionName]);
+    await db.request()
+      .input('session_name', sql.VarChar, sessionName)
+      .query('INSERT INTO sessions (session_name) VALUES (@session_name)');
+
     startAgentSession(sessionName);
     activeSessions[sessionName] = true;
 
@@ -481,7 +538,7 @@ app.post('/send-message', async (req, res) => {
 });
 
 
-app.listen(4000, () => console.log('✅ Session API is running on port 4000'));
+app.listen(3002, () => console.log('✅ Session API is running on port 3002'));
 
 // Run the application
 if (require.main === module) {

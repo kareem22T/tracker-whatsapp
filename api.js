@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require('mysql2/promise');
+const sql = require('mssql'); // Changed from mysql2 to mssql
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer'); // npm install multer
@@ -11,12 +11,16 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Database configuration
+// Database configuration - Updated for SQL Server
 const dbConfig = {
-  host: 'localhost',
-  user: 'root',
-  password: 'password',
-  database: 'whatsapp_tracker'
+  user: 'sa',
+  password: '123456',
+  server: 'localhost', // or IP address
+  database: 'whatsapp_tracker',
+  options: {
+    encrypt: false, // set to true if using Azure or SSL
+    trustServerCertificate: true // for local development
+  }
 };
 
 // Media directory
@@ -51,8 +55,36 @@ const upload = multer({
 // Initialize database connection
 async function initDatabase() {
   try {
-    db = await mysql.createConnection(dbConfig);
-    console.log('✅ Database connected successfully');
+    db = await sql.connect(dbConfig);
+    console.log('✅ SQL Server connected successfully');
+    
+    // Create messages table if it doesn't exist
+    await db.request().query(`
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'messages')
+      BEGIN
+        CREATE TABLE messages (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          message_id VARCHAR(255) UNIQUE,
+          from_number VARCHAR(50),
+          to_number VARCHAR(50),
+          message_body TEXT,
+          message_type VARCHAR(20),
+          is_group BIT DEFAULT 0,
+          group_id VARCHAR(100),
+          timestamp DATETIME DEFAULT GETDATE(),
+          is_from_me BIT DEFAULT 0,
+          message_status VARCHAR(20),
+          session_name VARCHAR(255),
+          media_url VARCHAR(500),
+          media_filename VARCHAR(255),
+          media_mimetype VARCHAR(100),
+          media_size BIGINT,
+          created_at DATETIME DEFAULT GETDATE()
+        )
+      END
+    `);
+    
+    console.log('✅ Messages table ready');
   } catch (error) {
     console.error('❌ Database connection failed:', error);
     throw error;
@@ -125,7 +157,7 @@ function getPaginationInfo(page, limit, total) {
 // ENDPOINTS
 
 // 1. Get all messages sent by a specific number
-app.get('/api/messages/sent-by/:number', async (req, res) => {
+app.get('/messages/sent-by/:number', async (req, res) => {
   try {
     const { number } = req.params;
     const page = parseInt(req.query.page) || 1;
@@ -133,20 +165,25 @@ app.get('/api/messages/sent-by/:number', async (req, res) => {
     const offset = (page - 1) * limit;
 
     // Get total count
-    const [countResult] = await db.execute(
-      'SELECT COUNT(*) as total FROM messages WHERE from_number = ? AND is_from_me = true',
-      [number]
-    );
-    const total = countResult[0].total;
+    const countResult = await db.request()
+      .input('number', sql.VarChar, number)
+      .query('SELECT COUNT(*) as total FROM messages WHERE from_number = @number AND is_from_me = 1');
+    
+    const total = countResult.recordset[0].total;
 
     // Get messages
-    const [messages] = await db.execute(`
-      SELECT * FROM messages 
-      WHERE from_number = ? AND is_from_me = true 
-      ORDER BY timestamp DESC 
-      LIMIT ? OFFSET ?
-    `, [number, limit, offset]);
+    const messagesResult = await db.request()
+      .input('number', sql.VarChar, number)
+      .input('limit', sql.Int, limit)
+      .input('offset', sql.Int, offset)
+      .query(`
+        SELECT * FROM messages 
+        WHERE from_number = @number AND is_from_me = 1 
+        ORDER BY timestamp DESC 
+        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+      `);
 
+    const messages = messagesResult.recordset;
     const pagination = getPaginationInfo(page, limit, total);
 
     res.json(createResponse(
@@ -163,7 +200,7 @@ app.get('/api/messages/sent-by/:number', async (req, res) => {
 });
 
 // 2. Get all messages sent or received by a specific number
-app.get('/api/messages/by-number/:number', async (req, res) => {
+app.get('/messages/by-number/:number', async (req, res) => {
   try {
     const { number } = req.params;
     const page = parseInt(req.query.page) || 1;
@@ -171,20 +208,25 @@ app.get('/api/messages/by-number/:number', async (req, res) => {
     const offset = (page - 1) * limit;
 
     // Get total count
-    const [countResult] = await db.execute(
-      'SELECT COUNT(*) as total FROM messages WHERE from_number = ? OR to_number = ?',
-      [number, number]
-    );
-    const total = countResult[0].total;
+    const countResult = await db.request()
+      .input('number', sql.VarChar, number)
+      .query('SELECT COUNT(*) as total FROM messages WHERE from_number = @number OR to_number = @number');
+    
+    const total = countResult.recordset[0].total;
 
     // Get messages
-    const [messages] = await db.execute(`
-      SELECT * FROM messages 
-      WHERE from_number = ? OR to_number = ? 
-      ORDER BY timestamp DESC 
-      LIMIT ? OFFSET ?
-    `, [number, number, limit, offset]);
+    const messagesResult = await db.request()
+      .input('number', sql.VarChar, number)
+      .input('limit', sql.Int, limit)
+      .input('offset', sql.Int, offset)
+      .query(`
+        SELECT * FROM messages 
+        WHERE from_number = @number OR to_number = @number 
+        ORDER BY timestamp DESC 
+        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+      `);
 
+    const messages = messagesResult.recordset;
     const pagination = getPaginationInfo(page, limit, total);
 
     res.json(createResponse(
@@ -201,7 +243,7 @@ app.get('/api/messages/by-number/:number', async (req, res) => {
 });
 
 // 3. Get chat between two numbers
-app.get('/api/messages/chat/:number1/:number2', async (req, res) => {
+app.get('/messages/chat/:number1/:number2', async (req, res) => {
   try {
     const { number1, number2 } = req.params;
     const page = parseInt(req.query.page) || 1;
@@ -209,22 +251,32 @@ app.get('/api/messages/chat/:number1/:number2', async (req, res) => {
     const offset = (page - 1) * limit;
 
     // Get total count
-    const [countResult] = await db.execute(`
-      SELECT COUNT(*) as total FROM messages 
-      WHERE (from_number = ? AND to_number = ?) 
-         OR (from_number = ? AND to_number = ?)
-    `, [number1, number2, number2, number1]);
-    const total = countResult[0].total;
+    const countResult = await db.request()
+      .input('number1', sql.VarChar, number1)
+      .input('number2', sql.VarChar, number2)
+      .query(`
+        SELECT COUNT(*) as total FROM messages 
+        WHERE (from_number = @number1 AND to_number = @number2) 
+           OR (from_number = @number2 AND to_number = @number1)
+      `);
+    
+    const total = countResult.recordset[0].total;
 
     // Get messages
-    const [messages] = await db.execute(`
-      SELECT * FROM messages 
-      WHERE (from_number = ? AND to_number = ?) 
-         OR (from_number = ? AND to_number = ?)
-      ORDER BY timestamp ASC 
-      LIMIT ? OFFSET ?
-    `, [number1, number2, number2, number1, limit, offset]);
+    const messagesResult = await db.request()
+      .input('number1', sql.VarChar, number1)
+      .input('number2', sql.VarChar, number2)
+      .input('limit', sql.Int, limit)
+      .input('offset', sql.Int, offset)
+      .query(`
+        SELECT * FROM messages 
+        WHERE (from_number = @number1 AND to_number = @number2) 
+           OR (from_number = @number2 AND to_number = @number1)
+        ORDER BY timestamp ASC 
+        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+      `);
 
+    const messages = messagesResult.recordset;
     const pagination = getPaginationInfo(page, limit, total);
 
     res.json(createResponse(
@@ -240,23 +292,21 @@ app.get('/api/messages/chat/:number1/:number2', async (req, res) => {
   }
 });
 
-
 // 4. Download file by message ID
-app.get('/api/messages/:messageId/download', async (req, res) => {
+app.get('/messages/:messageId/download', async (req, res) => {
   try {
     const { messageId } = req.params;
 
     // Get message info from database
-    const [messages] = await db.execute(
-      'SELECT * FROM messages WHERE message_id = ? AND media_filename IS NOT NULL',
-      [messageId]
-    );
+    const messagesResult = await db.request()
+      .input('messageId', sql.VarChar, messageId)
+      .query('SELECT * FROM messages WHERE message_id = @messageId AND media_filename IS NOT NULL');
 
-    if (messages.length === 0) {
+    if (messagesResult.recordset.length === 0) {
       return res.status(404).json(createResponse(false, null, 'Message not found or has no media'));
     }
 
-    const message = messages[0];
+    const message = messagesResult.recordset[0];
     const filename = message.media_filename;
     const filepath = path.join(mediaDir, filename);
 
@@ -305,25 +355,24 @@ app.get('/api/messages/:messageId/download', async (req, res) => {
 });
 
 // 5. Get message details by ID
-app.get('/api/messages/:messageId', async (req, res) => {
+app.get('/messages/:messageId', async (req, res) => {
   try {
     const { messageId } = req.params;
 
-    const [messages] = await db.execute(
-      'SELECT * FROM messages WHERE message_id = ?',
-      [messageId]
-    );
+    const messagesResult = await db.request()
+      .input('messageId', sql.VarChar, messageId)
+      .query('SELECT * FROM messages WHERE message_id = @messageId');
 
-    if (messages.length === 0) {
+    if (messagesResult.recordset.length === 0) {
       return res.status(404).json(createResponse(false, null, 'Message not found'));
     }
 
-    const message = messages[0];
+    const message = messagesResult.recordset[0];
 
     // Add download URL if message has media
     if (message.media_filename) {
-      message.downloadUrl = `/api/messages/${messageId}/download`;
-      message.viewUrl = `/api/messages/${messageId}/view`;
+      message.downloadUrl = `/messages/${messageId}/download`;
+      message.viewUrl = `/messages/${messageId}/view`;
     }
 
     res.json(createResponse(true, message, 'Message retrieved successfully'));
@@ -334,22 +383,21 @@ app.get('/api/messages/:messageId', async (req, res) => {
   }
 });
 
-// 7. View file inline (for images, videos, etc.)
-app.get('/api/messages/:messageId/view', async (req, res) => {
+// 6. View file inline (for images, videos, etc.)
+app.get('/messages/:messageId/view', async (req, res) => {
   try {
     const { messageId } = req.params;
 
     // Get message info from database
-    const [messages] = await db.execute(
-      'SELECT * FROM messages WHERE message_id = ? AND media_filename IS NOT NULL',
-      [messageId]
-    );
+    const messagesResult = await db.request()
+      .input('messageId', sql.VarChar, messageId)
+      .query('SELECT * FROM messages WHERE message_id = @messageId AND media_filename IS NOT NULL');
 
-    if (messages.length === 0) {
+    if (messagesResult.recordset.length === 0) {
       return res.status(404).json(createResponse(false, null, 'Message not found or has no media'));
     }
 
-    const message = messages[0];
+    const message = messagesResult.recordset[0];
     const filename = message.media_filename;
     const filepath = path.join(mediaDir, filename);
 
@@ -383,7 +431,7 @@ app.get('/api/messages/:messageId/view', async (req, res) => {
 });
 
 // 7. Get all messages with pagination and filters
-app.get('/api/messages', async (req, res) => {
+app.get('/messages', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
@@ -393,11 +441,11 @@ app.get('/api/messages', async (req, res) => {
     const isGroup = req.query.isGroup;
 
     let whereClause = '1=1';
-    let params = [];
+    const request = db.request();
 
     if (messageType) {
-      whereClause += ' AND message_type = ?';
-      params.push(messageType);
+      whereClause += ' AND message_type = @messageType';
+      request.input('messageType', sql.VarChar, messageType);
     }
 
     if (hasMedia !== undefined) {
@@ -409,30 +457,34 @@ app.get('/api/messages', async (req, res) => {
     }
 
     if (isGroup !== undefined) {
-      whereClause += ' AND is_group = ?';
-      params.push(isGroup === 'true');
+      whereClause += ' AND is_group = @isGroup';
+      request.input('isGroup', sql.Bit, isGroup === 'true');
     }
 
     // Get total count
-    const [countResult] = await db.execute(
-      `SELECT COUNT(*) as total FROM messages WHERE ${whereClause}`,
-      params
+    const countResult = await request.query(
+      `SELECT COUNT(*) as total FROM messages WHERE ${whereClause}`
     );
-    const total = countResult[0].total;
+    const total = countResult.recordset[0].total;
 
     // Get messages
-    const [messages] = await db.execute(`
-      SELECT * FROM messages 
-      WHERE ${whereClause}
-      ORDER BY timestamp DESC 
-      LIMIT ? OFFSET ?
-    `, [...params, limit, offset]);
+    const messagesResult = await request
+      .input('limit', sql.Int, limit)
+      .input('offset', sql.Int, offset)
+      .query(`
+        SELECT * FROM messages 
+        WHERE ${whereClause}
+        ORDER BY timestamp DESC 
+        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+      `);
+
+    const messages = messagesResult.recordset;
 
     // Add download URLs for messages with media
     const messagesWithUrls = messages.map(message => {
       if (message.media_filename) {
-        message.downloadUrl = `/api/messages/${message.message_id}/download`;
-        message.viewUrl = `/api/messages/${message.message_id}/view`;
+        message.downloadUrl = `/messages/${message.message_id}/download`;
+        message.viewUrl = `/messages/${message.message_id}/view`;
       }
       return message;
     });
@@ -453,10 +505,10 @@ app.get('/api/messages', async (req, res) => {
 });
 
 // 8. Health check endpoint
-app.get('/api/health', async (req, res) => {
+app.get('/health', async (req, res) => {
   try {
     // Check database connection
-    await db.execute('SELECT 1');
+    await db.request().query('SELECT 1');
     
     // Check WhatsApp client status
     const whatsappStatus = whatsappClient ? 'connected' : 'disconnected';
@@ -497,7 +549,6 @@ async function startServer() {
     // Initialize database
     await initDatabase();
     
-    
     // Start server
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => {
@@ -505,14 +556,14 @@ async function startServer() {
       console.log(`📁 Media directory: ${mediaDir}`);
       console.log(`
 📋 Available Endpoints:
-- GET  /api/health - Health check
-- GET  /api/messages - Get all messages (with filters)
-- GET  /api/messages/sent-by/:number - Get messages sent by number
-- GET  /api/messages/by-number/:number - Get all messages for number
-- GET  /api/messages/chat/:number1/:number2 - Get chat between two numbers
-- GET  /api/messages/:messageId - Get message details
-- GET  /api/messages/:messageId/download - Download media file
-- GET  /api/messages/:messageId/view - View media file inline
+- GET  /health - Health check
+- GET  /messages - Get all messages (with filters)
+- GET  /messages/sent-by/:number - Get messages sent by number
+- GET  /messages/by-number/:number - Get all messages for number
+- GET  /messages/chat/:number1/:number2 - Get chat between two numbers
+- GET  /messages/:messageId - Get message details
+- GET  /messages/:messageId/download - Download media file
+- GET  /messages/:messageId/view - View media file inline
 
 📝 Query Parameters:
 - page, limit - Pagination
@@ -542,7 +593,7 @@ process.on('SIGINT', async () => {
   
   if (db) {
     try {
-      await db.end();
+      await sql.close();
     } catch (error) {
       console.error('Error closing database connection:', error);
     }
