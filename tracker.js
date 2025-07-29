@@ -35,7 +35,7 @@ const dbConfig = {
   user: 'General@Cyrus',
   password: 'CyrusGeneral@Password',
   server: 'localhost',
-  database: 'CyrusGeneral@Password',
+  database: 'whatsap_tracker',
   options: {
     encrypt: false,
     trustServerCertificate: true

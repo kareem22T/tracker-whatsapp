@@ -26,7 +26,7 @@ const dbConfig = {
   user: 'General@Cyrus',
   password: 'CyrusGeneral@Password',
   server: 'localhost',
-  database: 'CyrusGeneral@Password',
+  database: 'whatsap_tracker',
   options: {
     encrypt: false, // set to true if using Azure or SSL
     trustServerCertificate: true // for local development
