@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WhatsApp Web QR</title>
+    <style>
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+            font-family: Arial, sans-serif;
+        }
+
+        .qr-container {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+
+        .qr-container img {
+            width: 300px;
+            height: 300px;
+        }
+
+        .note {
+            margin-top: 1rem;
+            color: #555;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="qr-container">
+        <img id="qr-image" src="" alt="QR Code" />
+        <div class="note">Scan the QR code using WhatsApp</div>
+    </div>
+
+    <script>
+        async function fetchQRCode() {
+            try {
+                const response = await fetch('http://localhost:3002/qr/agent_1751989249790');
+                const data = await response.json();
+                const img = document.getElementById('qr-image');
+                img.src = data.qr;
+            } catch (error) {
+                console.error('Failed to fetch QR code:', error);
+            }
+        }
+
+        fetchQRCode(); // Fetch immediately
+        setInterval(fetchQRCode, 5000); // Then every 5 seconds
+    </script>
+</body>
+
+</html>
