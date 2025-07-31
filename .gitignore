@@ -1,1 +1,5 @@
 node_modules/
+media/
+.wwebjs_cache/
+sessions/
+uploads/

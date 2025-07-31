@@ -10,7 +10,7 @@ const app = express();
 
 // Middleware
 const corsOptions = {
-  origin: ['http://67.211.221.109:4000'], // React dev server
+  origin: "*", // In production, specify your frontend URL
   credentials: true,
   optionsSuccessStatus: 200,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],

@@ -37,8 +37,8 @@ const dbConfig = {
   server: 'localhost',
   database: 'whatsap_tracker',
   options: {
-    encrypt: false,
-    trustServerCertificate: true
+    encrypt: false, // set to true if using Azure or SSL
+    trustServerCertificate: true // for local development
   }
 };
 
@@ -51,7 +51,7 @@ if (!fs.existsSync(mediaDir)) {
 }
 
 // Real-time event emitter functions
-function emitNewMessage(sessionName, message, direction) {
+function emitNewMessage(sessionName, message, direction, participantInfo = null) {
   const eventData = {
     sessionName,
     direction, // 'sent' or 'received'
@@ -63,7 +63,17 @@ function emitNewMessage(sessionName, message, direction) {
     isGroup: message.from.includes('@g.us') || message.to.includes('@g.us'),
     hasMedia: message.hasMedia,
     timestamp: new Date(message.timestamp * 1000).toISOString(),
-    fromMe: message.fromMe
+    fromMe: message.fromMe,
+    // Enhanced participant information
+    participantName: participantInfo ? participantInfo.displayName : null,
+    participantPhone: participantInfo ? participantInfo.phone : null,
+    contactPushname: participantInfo ? participantInfo.pushname : null,
+    // Reply information
+    isReply: participantInfo ? participantInfo.isReply : false,
+    quotedMessageId: participantInfo ? participantInfo.quotedMessageId : null,
+    quotedMessageBody: participantInfo ? participantInfo.quotedMessageBody : null,
+    quotedMessageFrom: participantInfo ? participantInfo.quotedMessageFrom : null,
+    quotedMessageType: participantInfo ? participantInfo.quotedMessageType : null
   };
 
   // Emit to all connected clients
@@ -76,8 +86,10 @@ function emitNewMessage(sessionName, message, direction) {
   const chatId = message.fromMe ? message.to : message.from;
   io.emit(`chat-${chatId}`, eventData);
 
-  console.log(`🔴 Real-time event emitted: ${direction} message for session ${sessionName}`);
+  const replyText = eventData.isReply ? ' (REPLY)' : '';
+  console.log(`🔴 Real-time event emitted: ${direction} message${replyText} for session ${sessionName} from ${participantInfo?.displayName || 'Unknown'}`);
 }
+
 
 function emitMessageStatusUpdate(messageId, status, sessionName) {
   const eventData = {
@@ -156,7 +168,7 @@ async function initDatabase() {
     db = await sql.connect(dbConfig);
     console.log('✅ SQL Server connected successfully');
 
-    // Create messages table with better structure
+    // Create messages table with enhanced structure including reply support
     await db.request().query(`
       IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'messages')
       BEGIN
@@ -179,8 +191,165 @@ async function initDatabase() {
           media_size BIGINT,
           chat_id VARCHAR(255),
           sender_name VARCHAR(255),
-          created_at DATETIME DEFAULT GETDATE()
+          created_at DATETIME DEFAULT GETDATE(),
+          -- Enhanced participant tracking columns
+          participant_name NVARCHAR(255),
+          participant_phone VARCHAR(50),
+          contact_pushname NVARCHAR(255),
+          -- Reply support columns
+          is_reply BIT DEFAULT 0,
+          quoted_message_id VARCHAR(255),
+          quoted_message_body NVARCHAR(max),
+          quoted_message_from VARCHAR(255),
+          quoted_message_type VARCHAR(50),
+          quoted_message_timestamp DATETIME
         )
+        
+        -- Create indexes for better performance
+        CREATE INDEX IX_messages_participant_phone ON messages(participant_phone);
+        CREATE INDEX IX_messages_participant_name ON messages(participant_name);
+        CREATE INDEX IX_messages_is_reply ON messages(is_reply);
+        CREATE INDEX IX_messages_quoted_message_id ON messages(quoted_message_id);
+        CREATE INDEX IX_messages_session_name ON messages(session_name);
+        CREATE INDEX IX_messages_chat_id ON messages(chat_id);
+        CREATE INDEX IX_messages_timestamp ON messages(timestamp);
+        CREATE INDEX IX_messages_message_status ON messages(message_status);
+        CREATE INDEX IX_messages_from_number ON messages(from_number);
+        CREATE INDEX IX_messages_to_number ON messages(to_number);
+        
+        PRINT 'Messages table created with reply support'
+      END
+      ELSE
+      BEGIN
+        -- Add new columns if they don't exist (for existing databases)
+        
+        -- Enhanced participant tracking columns
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'participant_name')
+        BEGIN
+          ALTER TABLE messages ADD participant_name NVARCHAR(255);
+          PRINT 'Added participant_name column'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'participant_phone')
+        BEGIN
+          ALTER TABLE messages ADD participant_phone VARCHAR(50);
+          PRINT 'Added participant_phone column'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'contact_pushname')
+        BEGIN
+          ALTER TABLE messages ADD contact_pushname NVARCHAR(255);
+          PRINT 'Added contact_pushname column'
+        END
+        
+        -- Reply support columns
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'is_reply')
+        BEGIN
+          ALTER TABLE messages ADD is_reply BIT DEFAULT 0;
+          PRINT 'Added is_reply column'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'quoted_message_id')
+        BEGIN
+          ALTER TABLE messages ADD quoted_message_id VARCHAR(255);
+          PRINT 'Added quoted_message_id column'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'quoted_message_body')
+        BEGIN
+          ALTER TABLE messages ADD quoted_message_body NVARCHAR(max);
+          PRINT 'Added quoted_message_body column'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'quoted_message_from')
+        BEGIN
+          ALTER TABLE messages ADD quoted_message_from VARCHAR(255);
+          PRINT 'Added quoted_message_from column'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'quoted_message_type')
+        BEGIN
+          ALTER TABLE messages ADD quoted_message_type VARCHAR(50);
+          PRINT 'Added quoted_message_type column'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'messages' AND COLUMN_NAME = 'quoted_message_timestamp')
+        BEGIN
+          ALTER TABLE messages ADD quoted_message_timestamp DATETIME;
+          PRINT 'Added quoted_message_timestamp column'
+        END
+        
+        -- Create missing indexes
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_participant_phone' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_participant_phone ON messages(participant_phone);
+          PRINT 'Created IX_messages_participant_phone index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_participant_name' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_participant_name ON messages(participant_name);
+          PRINT 'Created IX_messages_participant_name index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_is_reply' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_is_reply ON messages(is_reply);
+          PRINT 'Created IX_messages_is_reply index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_quoted_message_id' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_quoted_message_id ON messages(quoted_message_id);
+          PRINT 'Created IX_messages_quoted_message_id index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_session_name' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_session_name ON messages(session_name);
+          PRINT 'Created IX_messages_session_name index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_chat_id' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_chat_id ON messages(chat_id);
+          PRINT 'Created IX_messages_chat_id index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_timestamp' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_timestamp ON messages(timestamp);
+          PRINT 'Created IX_messages_timestamp index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_message_status' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_message_status ON messages(message_status);
+          PRINT 'Created IX_messages_message_status index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_from_number' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_from_number ON messages(from_number);
+          PRINT 'Created IX_messages_from_number index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_messages_to_number' AND object_id = OBJECT_ID('messages'))
+        BEGIN
+          CREATE INDEX IX_messages_to_number ON messages(to_number);
+          PRINT 'Created IX_messages_to_number index'
+        END
+        
+        PRINT 'Messages table updated with reply support and enhanced indexing'
       END
     `);
 
@@ -192,21 +361,80 @@ async function initDatabase() {
           id INT IDENTITY(1,1) PRIMARY KEY,
           session_name VARCHAR(255) UNIQUE NOT NULL,
           agent_name VARCHAR(255) NOT NULL,
-          created_at DATETIME DEFAULT GETDATE()
+          created_at DATETIME DEFAULT GETDATE(),
+          updated_at DATETIME DEFAULT GETDATE(),
+          is_active BIT DEFAULT 1,
+          last_connected DATETIME,
+          connection_status VARCHAR(50) DEFAULT 'inactive'
         )
+        
+        -- Create indexes for sessions
+        CREATE INDEX IX_sessions_agent_name ON sessions(agent_name);
+        CREATE INDEX IX_sessions_is_active ON sessions(is_active);
+        CREATE INDEX IX_sessions_connection_status ON sessions(connection_status);
+        
+        PRINT 'Sessions table created'
       END
       ELSE
       BEGIN
-        -- Add agent_name column if it doesn't exist (for existing databases)
+        -- Add new columns if they don't exist (for existing databases)
         IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
                       WHERE TABLE_NAME = 'sessions' AND COLUMN_NAME = 'agent_name')
         BEGIN
           ALTER TABLE sessions ADD agent_name VARCHAR(255) NOT NULL DEFAULT 'Unknown Agent'
+          PRINT 'Added agent_name column to sessions'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'sessions' AND COLUMN_NAME = 'updated_at')
+        BEGIN
+          ALTER TABLE sessions ADD updated_at DATETIME DEFAULT GETDATE()
+          PRINT 'Added updated_at column to sessions'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'sessions' AND COLUMN_NAME = 'is_active')
+        BEGIN
+          ALTER TABLE sessions ADD is_active BIT DEFAULT 1
+          PRINT 'Added is_active column to sessions'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'sessions' AND COLUMN_NAME = 'last_connected')
+        BEGIN
+          ALTER TABLE sessions ADD last_connected DATETIME
+          PRINT 'Added last_connected column to sessions'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'sessions' AND COLUMN_NAME = 'connection_status')
+        BEGIN
+          ALTER TABLE sessions ADD connection_status VARCHAR(50) DEFAULT 'inactive'
+          PRINT 'Added connection_status column to sessions'
+        END
+        
+        -- Create missing indexes for sessions
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sessions_agent_name' AND object_id = OBJECT_ID('sessions'))
+        BEGIN
+          CREATE INDEX IX_sessions_agent_name ON sessions(agent_name);
+          PRINT 'Created IX_sessions_agent_name index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sessions_is_active' AND object_id = OBJECT_ID('sessions'))
+        BEGIN
+          CREATE INDEX IX_sessions_is_active ON sessions(is_active);
+          PRINT 'Created IX_sessions_is_active index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sessions_connection_status' AND object_id = OBJECT_ID('sessions'))
+        BEGIN
+          CREATE INDEX IX_sessions_connection_status ON sessions(connection_status);
+          PRINT 'Created IX_sessions_connection_status index'
         END
       END
     `);
 
-    // Create chats table - NEW
+    // Create enhanced chats table
     await db.request().query(`
       IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'chats')
       BEGIN
@@ -216,7 +444,7 @@ async function initDatabase() {
           chat_name NVARCHAR(255),
           chat_type VARCHAR(20) NOT NULL, -- 'individual' or 'group'
           participant_number VARCHAR(50), -- For individual chats
-          group_name VARCHAR(255), -- For group chats
+          group_name NVARCHAR(255), -- For group chats
           last_message_id VARCHAR(255),
           last_message_text NVARCHAR(max),
           last_message_time DATETIME,
@@ -226,14 +454,248 @@ async function initDatabase() {
           session_name VARCHAR(255),
           created_at DATETIME DEFAULT GETDATE(),
           updated_at DATETIME DEFAULT GETDATE(),
-          FOREIGN KEY (last_message_id) REFERENCES messages(message_id)
+          -- Enhanced chat metadata
+          total_messages INT DEFAULT 0,
+          last_reply_id VARCHAR(255), -- Track last reply in this chat
+          reply_count INT DEFAULT 0   -- Count of replies in this chat
         )
+        
+        -- Create indexes for chats
+        CREATE INDEX IX_chats_session_name ON chats(session_name);
+        CREATE INDEX IX_chats_chat_type ON chats(chat_type);
+        CREATE INDEX IX_chats_is_active ON chats(is_active);
+        CREATE INDEX IX_chats_last_message_time ON chats(last_message_time);
+        CREATE INDEX IX_chats_participant_number ON chats(participant_number);
+        
+        PRINT 'Chats table created with enhanced features'
+      END
+      ELSE
+      BEGIN
+        -- Add new columns if they don't exist
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'chats' AND COLUMN_NAME = 'total_messages')
+        BEGIN
+          ALTER TABLE chats ADD total_messages INT DEFAULT 0
+          PRINT 'Added total_messages column to chats'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'chats' AND COLUMN_NAME = 'last_reply_id')
+        BEGIN
+          ALTER TABLE chats ADD last_reply_id VARCHAR(255)
+          PRINT 'Added last_reply_id column to chats'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
+                      WHERE TABLE_NAME = 'chats' AND COLUMN_NAME = 'reply_count')
+        BEGIN
+          ALTER TABLE chats ADD reply_count INT DEFAULT 0
+          PRINT 'Added reply_count column to chats'
+        END
+        
+        -- Create missing indexes for chats
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_chats_session_name' AND object_id = OBJECT_ID('chats'))
+        BEGIN
+          CREATE INDEX IX_chats_session_name ON chats(session_name);
+          PRINT 'Created IX_chats_session_name index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_chats_chat_type' AND object_id = OBJECT_ID('chats'))
+        BEGIN
+          CREATE INDEX IX_chats_chat_type ON chats(chat_type);
+          PRINT 'Created IX_chats_chat_type index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_chats_is_active' AND object_id = OBJECT_ID('chats'))
+        BEGIN
+          CREATE INDEX IX_chats_is_active ON chats(is_active);
+          PRINT 'Created IX_chats_is_active index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_chats_last_message_time' AND object_id = OBJECT_ID('chats'))
+        BEGIN
+          CREATE INDEX IX_chats_last_message_time ON chats(last_message_time);
+          PRINT 'Created IX_chats_last_message_time index'
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_chats_participant_number' AND object_id = OBJECT_ID('chats'))
+        BEGIN
+          CREATE INDEX IX_chats_participant_number ON chats(participant_number);
+          PRINT 'Created IX_chats_participant_number index'
+        END
       END
     `);
 
-    console.log('✅ Tables ready (messages, sessions with agent_name, chats)');
+    // Create message_analytics table for better reporting
+    await db.request().query(`
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'message_analytics')
+      BEGIN
+        CREATE TABLE message_analytics (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          session_name VARCHAR(255) NOT NULL,
+          date_recorded DATE NOT NULL,
+          total_messages INT DEFAULT 0,
+          sent_messages INT DEFAULT 0,
+          received_messages INT DEFAULT 0,
+          reply_messages INT DEFAULT 0,
+          media_messages INT DEFAULT 0,
+          group_messages INT DEFAULT 0,
+          individual_messages INT DEFAULT 0,
+          unique_contacts INT DEFAULT 0,
+          created_at DATETIME DEFAULT GETDATE(),
+          
+          UNIQUE(session_name, date_recorded)
+        )
+        
+        CREATE INDEX IX_message_analytics_session_date ON message_analytics(session_name, date_recorded);
+        CREATE INDEX IX_message_analytics_date ON message_analytics(date_recorded);
+        
+        PRINT 'Message analytics table created'
+      END
+    `);
+
+    // Create triggers to automatically update analytics (optional but useful)
+    await db.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.triggers WHERE name = 'tr_messages_analytics_insert')
+      BEGIN
+        EXEC('
+        CREATE TRIGGER tr_messages_analytics_insert
+        ON messages
+        AFTER INSERT
+        AS
+        BEGIN
+          SET NOCOUNT ON;
+          
+          DECLARE @session_name VARCHAR(255), @date_recorded DATE, @is_from_me BIT, @is_reply BIT, @has_media BIT, @is_group BIT;
+          
+          SELECT 
+            @session_name = session_name,
+            @date_recorded = CAST(created_at AS DATE),
+            @is_from_me = is_from_me,
+            @is_reply = is_reply,
+            @has_media = CASE WHEN media_filename IS NOT NULL THEN 1 ELSE 0 END,
+            @is_group = is_group
+          FROM inserted;
+          
+          -- Upsert analytics record
+          IF EXISTS (SELECT 1 FROM message_analytics WHERE session_name = @session_name AND date_recorded = @date_recorded)
+          BEGIN
+            UPDATE message_analytics 
+            SET 
+              total_messages = total_messages + 1,
+              sent_messages = sent_messages + CASE WHEN @is_from_me = 1 THEN 1 ELSE 0 END,
+              received_messages = received_messages + CASE WHEN @is_from_me = 0 THEN 1 ELSE 0 END,
+              reply_messages = reply_messages + CASE WHEN @is_reply = 1 THEN 1 ELSE 0 END,
+              media_messages = media_messages + CASE WHEN @has_media = 1 THEN 1 ELSE 0 END,
+              group_messages = group_messages + CASE WHEN @is_group = 1 THEN 1 ELSE 0 END,
+              individual_messages = individual_messages + CASE WHEN @is_group = 0 THEN 1 ELSE 0 END
+            WHERE session_name = @session_name AND date_recorded = @date_recorded;
+          END
+          ELSE
+          BEGIN
+            INSERT INTO message_analytics (
+              session_name, date_recorded, total_messages, sent_messages, received_messages,
+              reply_messages, media_messages, group_messages, individual_messages
+            ) VALUES (
+              @session_name, @date_recorded, 1,
+              CASE WHEN @is_from_me = 1 THEN 1 ELSE 0 END,
+              CASE WHEN @is_from_me = 0 THEN 1 ELSE 0 END,
+              CASE WHEN @is_reply = 1 THEN 1 ELSE 0 END,
+              CASE WHEN @has_media = 1 THEN 1 ELSE 0 END,
+              CASE WHEN @is_group = 1 THEN 1 ELSE 0 END,
+              CASE WHEN @is_group = 0 THEN 1 ELSE 0 END
+            );
+          END
+        END
+        ')
+        
+        PRINT 'Analytics trigger created'
+      END
+    `);
+
+    // Create stored procedures for common queries
+    await db.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.procedures WHERE name = 'sp_GetReplyChain')
+      BEGIN
+        EXEC('
+        CREATE PROCEDURE sp_GetReplyChain
+          @MessageId VARCHAR(255)
+        AS
+        BEGIN
+          SET NOCOUNT ON;
+          
+          -- Get the original message
+          SELECT * FROM messages WHERE message_id = @MessageId;
+          
+          -- Get all replies to this message
+          WITH ReplyChain AS (
+            SELECT *, 1 as Level
+            FROM messages 
+            WHERE quoted_message_id = @MessageId
+            
+            UNION ALL
+            
+            SELECT m.*, rc.Level + 1
+            FROM messages m
+            INNER JOIN ReplyChain rc ON m.quoted_message_id = rc.message_id
+            WHERE rc.Level < 10 -- Prevent infinite recursion
+          )
+          SELECT * FROM ReplyChain ORDER BY Level, timestamp;
+        END
+        ')
+        
+        PRINT 'Reply chain stored procedure created'
+      END
+    `);
+
+    await db.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.procedures WHERE name = 'sp_GetChatStatistics')
+      BEGIN
+        EXEC('
+        CREATE PROCEDURE sp_GetChatStatistics
+          @SessionName VARCHAR(255),
+          @ChatId VARCHAR(255) = NULL
+        AS
+        BEGIN
+          SET NOCOUNT ON;
+          
+          DECLARE @WhereClause NVARCHAR(500) = '' WHERE session_name = @SessionName '';
+          
+          IF @ChatId IS NOT NULL
+            SET @WhereClause = @WhereClause + '' AND chat_id = @ChatId '';
+          
+          DECLARE @SQL NVARCHAR(2000) = ''
+          SELECT 
+            COUNT(*) as total_messages,
+            SUM(CASE WHEN is_from_me = 1 THEN 1 ELSE 0 END) as sent_count,
+            SUM(CASE WHEN is_from_me = 0 THEN 1 ELSE 0 END) as received_count,
+            SUM(CASE WHEN is_reply = 1 THEN 1 ELSE 0 END) as reply_count,
+            SUM(CASE WHEN media_filename IS NOT NULL THEN 1 ELSE 0 END) as media_count,
+            COUNT(DISTINCT participant_phone) as unique_participants,
+            MIN(timestamp) as first_message_time,
+            MAX(timestamp) as last_message_time
+          FROM messages '' + @WhereClause;
+          
+          EXEC sp_executesql @SQL, N''@SessionName VARCHAR(255), @ChatId VARCHAR(255)'', @SessionName, @ChatId;
+        END
+        ')
+        
+        PRINT 'Chat statistics stored procedure created'
+      END
+    `);
+
+    console.log('✅ Tables ready with enhanced features:');
+    console.log('   - Messages table with reply support and participant tracking');
+    console.log('   - Sessions table with agent management');
+    console.log('   - Chats table with enhanced metadata');
+    console.log('   - Message analytics table for reporting');
+    console.log('   - Comprehensive indexing for performance');
+    console.log('   - Automatic analytics triggers');
+    console.log('   - Stored procedures for complex queries');
+    
   } catch (error) {
-    console.error('❌ Database connection failed:', error);
+    console.error('❌ Database initialization failed:', error);
+    throw error;
   }
 }
 
@@ -276,8 +738,13 @@ async function downloadMedia(message) {
   }
 }
 
-async function updateOrCreateChat(message, sessionName) {
+async function updateOrCreateChat(message, sessionName, participantInfo = null) {
   try {
+    // Get participant info if not provided
+    if (!participantInfo) {
+      participantInfo = await getParticipantInfo(message);
+    }
+
     // Determine chat details
     let chatId, chatType, participantNumber, groupName, chatName;
     
@@ -303,13 +770,8 @@ async function updateOrCreateChat(message, sessionName) {
       participantNumber = message.fromMe ? message.to : message.from;
       groupName = null;
       
-      // Try to get contact name
-      try {
-        const contact = await message.getContact();
-        chatName = contact.pushname || contact.name || participantNumber;
-      } catch (error) {
-        chatName = participantNumber;
-      }
+      // Use participant info for chat name
+      chatName = participantInfo.displayName || participantNumber;
     }
 
     // Check if chat exists
@@ -320,7 +782,7 @@ async function updateOrCreateChat(message, sessionName) {
 
     const messageText = message.body || `[${message.type.toUpperCase()}]`;
     const messageTime = new Date(message.timestamp * 1000);
-    const messageFrom = message.fromMe ? 'You' : (message.from || 'Unknown');
+    const messageFrom = message.fromMe ? 'You' : (participantInfo.displayName || 'Unknown');
 
     if (existingChat.recordset.length > 0) {
       // Update existing chat
@@ -347,10 +809,10 @@ async function updateOrCreateChat(message, sessionName) {
       // Create new chat
       await db.request()
         .input('chat_id', sql.VarChar, chatId)
-        .input('chat_name', sql.VarChar, chatName)
+        .input('chat_name', sql.NVarChar(sql.MAX), chatName)
         .input('chat_type', sql.VarChar, chatType)
         .input('participant_number', sql.VarChar, participantNumber)
-        .input('group_name', sql.VarChar, groupName)
+        .input('group_name', sql.NVarChar(sql.MAX), groupName)
         .input('last_message_id', sql.VarChar, message.id.id)
         .input('last_message_text', sql.NVarChar(sql.MAX), messageText)
         .input('last_message_time', sql.DateTime, messageTime)
@@ -369,11 +831,12 @@ async function updateOrCreateChat(message, sessionName) {
         `);
     }
 
-    console.log(`💬 Chat updated: ${chatName} (${chatType})`);
+    console.log(`💬 Chat updated: ${chatName} (${chatType}) - Participant: ${participantInfo.displayName}`);
   } catch (error) {
     console.error('❌ Error updating chat:', error);
   }
 }
+
 
 function getFileExtension(mimetype) {
   const extensions = {
@@ -396,6 +859,88 @@ function getFileExtension(mimetype) {
   
   return extensions[mimetype] || '.bin';
 }
+async function getParticipantInfo(message) {
+  let participantInfo = {
+    phone: null,
+    name: null,
+    pushname: null,
+    displayName: null,
+    // New reply fields
+    isReply: false,
+    quotedMessageId: null,
+    quotedMessageBody: null,
+    quotedMessageFrom: null,
+    quotedMessageType: null,
+    quotedMessageTimestamp: null
+  };
+
+  try {
+    // Determine the participant phone number
+    if (message.fromMe) {
+      participantInfo.phone = message.to;
+    } else {
+      participantInfo.phone = message.from;
+    }
+
+    // For group messages, extract the actual sender
+    if (message.from.includes('@g.us') && !message.fromMe) {
+      if (message.author) {
+        participantInfo.phone = message.author;
+      }
+    }
+
+    // Get contact information (existing code)
+    if (!message.fromMe) {
+      try {
+        const contact = await message.getContact();
+        if (contact) {
+          participantInfo.name = contact.name || contact.verifiedName;
+          participantInfo.pushname = contact.pushname;
+          participantInfo.displayName = participantInfo.pushname || 
+                                       participantInfo.name || 
+                                       participantInfo.phone.replace('@c.us', '').replace('@g.us', '');
+        }
+      } catch (contactError) {
+        console.log('Could not get contact info:', contactError.message);
+      }
+    }
+
+    // CHECK FOR REPLY MESSAGE
+    if (message.hasQuotedMsg) {
+      participantInfo.isReply = true;
+      
+      try {
+        const quotedMsg = await message.getQuotedMessage();
+        if (quotedMsg) {
+          participantInfo.quotedMessageId = quotedMsg.id.id;
+          participantInfo.quotedMessageBody = quotedMsg.body || `[${quotedMsg.type?.toUpperCase() || 'MEDIA'}]`;
+          participantInfo.quotedMessageFrom = quotedMsg.from;
+          participantInfo.quotedMessageType = quotedMsg.type;
+          participantInfo.quotedMessageTimestamp = quotedMsg.timestamp ? new Date(quotedMsg.timestamp * 1000) : null;
+          
+          console.log(`💬 Reply detected: "${message.body}" replying to "${participantInfo.quotedMessageBody}"`);
+        }
+      } catch (quotedError) {
+        console.error('Error getting quoted message:', quotedError);
+        // Still mark as reply even if we can't get details
+        participantInfo.isReply = true;
+      }
+    }
+
+    // Final fallback for display name
+    if (!participantInfo.displayName) {
+      participantInfo.displayName = participantInfo.phone.replace('@c.us', '').replace('@g.us', '');
+    }
+
+  } catch (error) {
+    console.error('Error getting participant info with reply:', error);
+    participantInfo.phone = message.fromMe ? message.to : message.from;
+    participantInfo.displayName = participantInfo.phone.replace('@c.us', '').replace('@g.us', '');
+  }
+
+  return participantInfo;
+}
+
 
 // Enhanced function to save message with better error handling
 async function saveMessage(message, sessionName) {
@@ -410,23 +955,15 @@ async function saveMessage(message, sessionName) {
       return;
     }
 
+    // Get enhanced participant info including reply details
+    const participantInfo = await getParticipantInfo(message);
+
     let mediaInfo = null;
     if (message.hasMedia) {
       mediaInfo = await downloadMedia(message);
     }
 
-    // Get contact info for sender name
-    let senderName = null;
-    try {
-      if (!message.fromMe) {
-        const contact = await message.getContact();
-        senderName = contact.pushname || contact.name || contact.number;
-      }
-    } catch (error) {
-      console.log('Could not get contact info:', error.message);
-    }
-
-    // Get chat info
+    // Determine chat ID
     let chatId = message.from;
     if (message.from.includes('@g.us')) {
       chatId = message.from; // Group chat
@@ -439,12 +976,18 @@ async function saveMessage(message, sessionName) {
         message_id, from_number, to_number, message_body, 
         message_type, is_group, group_id, is_from_me, message_status,
         session_name, media_filename, media_mimetype, media_size,
-        chat_id, sender_name, timestamp
+        chat_id, sender_name, timestamp,
+        participant_name, participant_phone, contact_pushname,
+        is_reply, quoted_message_id, quoted_message_body, 
+        quoted_message_from, quoted_message_type, quoted_message_timestamp
       ) VALUES (
         @message_id, @from_number, @to_number, @message_body, 
         @message_type, @is_group, @group_id, @is_from_me, @message_status, 
         @session_name, @media_filename, @media_mimetype, @media_size,
-        @chat_id, @sender_name, @timestamp
+        @chat_id, @sender_name, @timestamp,
+        @participant_name, @participant_phone, @contact_pushname,
+        @is_reply, @quoted_message_id, @quoted_message_body,
+        @quoted_message_from, @quoted_message_type, @quoted_message_timestamp
       )
     `;
 
@@ -463,23 +1006,38 @@ async function saveMessage(message, sessionName) {
       .input('media_mimetype', sql.VarChar, mediaInfo ? mediaInfo.mimetype : null)
       .input('media_size', sql.BigInt, mediaInfo ? mediaInfo.size : null)
       .input('chat_id', sql.VarChar, chatId)
-      .input('sender_name', sql.VarChar, senderName)
+      .input('sender_name', sql.VarChar, participantInfo.displayName)
       .input('timestamp', sql.DateTime, new Date(message.timestamp * 1000))
+      .input('participant_name', sql.NVarChar, participantInfo.displayName)
+      .input('participant_phone', sql.VarChar, participantInfo.phone)
+      .input('contact_pushname', sql.NVarChar, participantInfo.pushname)
+      // Reply fields
+      .input('is_reply', sql.Bit, participantInfo.isReply)
+      .input('quoted_message_id', sql.VarChar, participantInfo.quotedMessageId)
+      .input('quoted_message_body', sql.NVarChar(sql.MAX), participantInfo.quotedMessageBody)
+      .input('quoted_message_from', sql.VarChar, participantInfo.quotedMessageFrom)
+      .input('quoted_message_type', sql.VarChar, participantInfo.quotedMessageType)
+      .input('quoted_message_timestamp', sql.DateTime, participantInfo.quotedMessageTimestamp)
       .query(query);
 
     // Update or create chat entry
-    await updateOrCreateChat(message, sessionName);
+    await updateOrCreateChat(message, sessionName, participantInfo);
 
-    // Emit real-time event
+    // Emit real-time event with reply information
     const direction = message.fromMe ? 'sent' : 'received';
-    emitNewMessage(sessionName, message, direction);
+    emitNewMessage(sessionName, message, direction, participantInfo);
 
+    const replyText = participantInfo.isReply ? '(REPLY)' : '';
     const mediaText = mediaInfo ? '(with media)' : '';
-    console.log(`✅ ${direction.toUpperCase()} message saved: ${message.id.id} ${mediaText}`);
+    console.log(`✅ ${direction.toUpperCase()} message saved: ${message.id.id} ${replyText} ${mediaText}`);
     console.log(`   From: ${message.from} | To: ${message.to} | Body: ${message.body || '[Media]'}`);
+    
+    if (participantInfo.isReply) {
+      console.log(`   ↳ Replying to: "${participantInfo.quotedMessageBody}"`);
+    }
 
   } catch (error) {
-    console.error('❌ Error saving message:', error);
+    console.error('❌ Error saving message with reply:', error);
   }
 }
 
@@ -508,7 +1066,7 @@ async function updateMessageStatus(messageId, status) {
 }
 
 // NEW FUNCTION: Send message
-async function sendMessage(sessionName, phoneNumber, messageText, mediaPath = null, caption = null) {
+async function sendMessage(sessionName, phoneNumber, messageText, mediaPath = null, caption = null, replyToMessageId = null) {
   try {
     const client = activeSessions[sessionName];
     
@@ -518,16 +1076,46 @@ async function sendMessage(sessionName, phoneNumber, messageText, mediaPath = nu
 
     const formattedNumber = formatPhoneNumber(phoneNumber);
     let sentMessage;
+    let options = {};
 
+    // Handle reply functionality
+    if (replyToMessageId) {
+      try {
+        // Find the original message in database to get more context
+        const originalMessageResult = await db.request()
+          .input('message_id', sql.VarChar, replyToMessageId)
+          .input('session_name', sql.VarChar, sessionName)
+          .query('SELECT * FROM messages WHERE message_id = @message_id AND session_name = @session_name');
+
+        if (originalMessageResult.recordset.length === 0) {
+          throw new Error(`Original message with ID ${replyToMessageId} not found`);
+        }
+
+        const originalMessage = originalMessageResult.recordset[0];
+        console.log(`📤 Preparing reply to message: ${originalMessage.message_body || '[Media]'}`);
+
+        // Set the quotedMessageId in options
+        options.quotedMessageId = replyToMessageId;
+        
+      } catch (replyError) {
+        console.error('Error setting up reply:', replyError);
+        throw new Error(`Failed to setup reply: ${replyError.message}`);
+      }
+    }
+
+    // Send the message based on type
     if (mediaPath && fs.existsSync(mediaPath)) {
-      // Send media message
+      // Send media message with optional reply
       const media = MessageMedia.fromFilePath(mediaPath);
-      sentMessage = await client.sendMessage(formattedNumber, media, { caption: caption || messageText });
-      console.log(`📤 Media message sent via ${sessionName} to ${formattedNumber}`);
+      if (caption) {
+        options.caption = caption;
+      }
+      sentMessage = await client.sendMessage(formattedNumber, media, options);
+      console.log(`📤 Media message sent via ${sessionName} to ${formattedNumber}${replyToMessageId ? ' (as reply)' : ''}`);
     } else {
-      // Send text message
-      sentMessage = await client.sendMessage(formattedNumber, messageText);
-      console.log(`📤 Text message sent via ${sessionName} to ${formattedNumber}: ${messageText}`);
+      // Send text message with optional reply
+      sentMessage = await client.sendMessage(formattedNumber, messageText, options);
+      console.log(`📤 Text message sent via ${sessionName} to ${formattedNumber}: ${messageText}${replyToMessageId ? ' (as reply)' : ''}`);
     }
 
     // The message will be automatically saved by the message listener
@@ -537,6 +1125,8 @@ async function sendMessage(sessionName, phoneNumber, messageText, mediaPath = nu
       to: formattedNumber,
       body: messageText,
       hasMedia: !!mediaPath,
+      isReply: !!replyToMessageId,
+      replyToMessageId: replyToMessageId,
       timestamp: new Date().toISOString()
     };
 
@@ -545,6 +1135,7 @@ async function sendMessage(sessionName, phoneNumber, messageText, mediaPath = nu
     throw error;
   }
 }
+
 
 // Initialize WhatsApp Web Client
 async function startAgentSession(sessionName) {
@@ -634,25 +1225,26 @@ async function startAgentSession(sessionName) {
 function setupEventListeners(client, sessionName) {
   // MAIN MESSAGE LISTENER - This captures ALL messages (sent and received)
   client.on('message', async (message) => {
-    
     const direction = message.fromMe ? '📤 SENT' : '📥 RECEIVED';
     const isGroup = message.from.includes('@g.us');
     const chatType = isGroup ? 'GROUP' : 'INDIVIDUAL';
     const mediaType = message.hasMedia ? `[${message.type.toUpperCase()}]` : '';
+    const replyType = message.hasQuotedMsg ? '↳ REPLY' : '';
     
-    console.log(`${direction} ${chatType} Message:`, {
+    console.log(`${direction} ${chatType} ${replyType} Message:`, {
       id: message.id.id,
       from: message.from,
       to: message.to,
       body: message.body || mediaType,
       type: message.type,
+      hasQuotedMsg: message.hasQuotedMsg,
       fromMe: message.fromMe,
       isGroup: isGroup,
       hasMedia: message.hasMedia,
       timestamp: new Date(message.timestamp * 1000).toISOString()
     });
     
-    // Save to database (this will also emit real-time events)
+    // Save to database with reply information
     await saveMessage(message, sessionName);
   });
 
@@ -937,11 +1529,9 @@ app.post('/add-session', async (req, res) => {
     });
   }
 });
-
-// NEW ENDPOINT: Send text message
 app.post('/send-message/:sessionName', async (req, res) => {
   const sessionName = req.params.sessionName;
-  const { phoneNumber, message, caption } = req.body;
+  const { phoneNumber, message, caption, replyToMessageId } = req.body;
 
   // Validate required fields
   if (!phoneNumber || !message) {
@@ -962,12 +1552,12 @@ app.post('/send-message/:sessionName', async (req, res) => {
   }
 
   try {
-    const result = await sendMessage(sessionName, phoneNumber, message);
+    const result = await sendMessage(sessionName, phoneNumber, message, null, caption, replyToMessageId);
     
     res.json(createResponse(
       true, 
       result, 
-      'Message sent successfully'
+      result.isReply ? 'Reply message sent successfully' : 'Message sent successfully'
     ));
 
   } catch (error) {
@@ -980,15 +1570,14 @@ app.post('/send-message/:sessionName', async (req, res) => {
   }
 });
 
-// NEW ENDPOINT: Send message with media
+// Enhanced API endpoint for sending media messages with reply support
 app.post('/send-media/:sessionName', upload.single('media'), async (req, res) => {
   const sessionName = req.params.sessionName;
   
-  // For multipart/form-data, the text fields are available after multer processes the request
-  // Access them from req.body AFTER multer middleware runs
   const phoneNumber = req.body.phoneNumber;
   const message = req.body?.message;
   const caption = req.body?.caption;
+  const replyToMessageId = req.body?.replyToMessageId;
   const mediaFile = req.file;
 
   // Validate required fields
@@ -1021,7 +1610,7 @@ app.post('/send-media/:sessionName', upload.single('media'), async (req, res) =>
     const mediaPath = mediaFile ? mediaFile.path : null;
     const messageText = message || caption || '';
     
-    const result = await sendMessage(sessionName, phoneNumber, messageText, mediaPath, caption);
+    const result = await sendMessage(sessionName, phoneNumber, messageText, mediaPath, caption, replyToMessageId);
     
     // Clean up uploaded file
     if (mediaFile && fs.existsSync(mediaFile.path)) {
@@ -1031,7 +1620,7 @@ app.post('/send-media/:sessionName', upload.single('media'), async (req, res) =>
     res.json(createResponse(
       true, 
       result, 
-      'Media message sent successfully'
+      result.isReply ? 'Reply media message sent successfully' : 'Media message sent successfully'
     ));
 
   } catch (error) {
@@ -1047,6 +1636,69 @@ app.post('/send-media/:sessionName', upload.single('media'), async (req, res) =>
       null, 
       `Failed to send media message: ${error.message}`
     ));
+  }
+});
+
+
+// NEW ENDPOINT: Send text message
+app.get('/messages/:sessionName', async (req, res) => {
+  const sessionName = req.params.sessionName;
+  const { limit = 50, offset = 0, type = 'all', participant = null } = req.query;
+  
+  try {
+    let whereClause = 'WHERE session_name = @session_name';
+    
+    if (type === 'sent') {
+      whereClause += ' AND is_from_me = 1';
+    } else if (type === 'received') {
+      whereClause += ' AND is_from_me = 0';
+    }
+    
+    // Filter by participant if specified
+    if (participant) {
+      whereClause += ' AND (participant_name LIKE @participant OR participant_phone LIKE @participant)';
+    }
+    
+    const query = `
+      SELECT 
+        message_id,
+        from_number,
+        to_number,
+        message_body,
+        message_type,
+        is_group,
+        is_from_me,
+        message_status,
+        media_filename,
+        media_mimetype,
+        sender_name,
+        participant_name,
+        participant_phone,
+        contact_pushname,
+        timestamp,
+        created_at
+      FROM messages 
+      ${whereClause}
+      ORDER BY timestamp DESC
+      OFFSET @offset ROWS
+      FETCH NEXT @limit ROWS ONLY
+    `;
+    
+    const request = db.request()
+      .input('session_name', sql.VarChar, sessionName)
+      .input('limit', sql.Int, parseInt(limit))
+      .input('offset', sql.Int, parseInt(offset));
+      
+    if (participant) {
+      request.input('participant', sql.VarChar, `%${participant}%`);
+    }
+    
+    const result = await request.query(query);
+    
+    res.json(createResponse(true, result.recordset, `Found ${result.recordset.length} messages`));
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json(createResponse(false, null, 'Error fetching messages'));
   }
 });
 
@@ -1231,6 +1883,37 @@ app.get('/chat/:sessionName/:chatId/messages', async (req, res) => {
   } catch (error) {
     console.error('Error fetching chat messages:', error);
     res.status(500).json(createResponse(false, null, 'Error fetching chat messages'));
+  }
+});
+
+app.get('/participants/:sessionName', async (req, res) => {
+  const sessionName = req.params.sessionName;
+  
+  try {
+    const query = `
+      SELECT 
+        participant_name,
+        participant_phone,
+        contact_pushname,
+        COUNT(*) as message_count,
+        MAX(timestamp) as last_message_time,
+        SUM(CASE WHEN is_from_me = 0 THEN 1 ELSE 0 END) as received_count,
+        SUM(CASE WHEN is_from_me = 1 THEN 1 ELSE 0 END) as sent_count
+      FROM messages 
+      WHERE session_name = @session_name 
+        AND participant_name IS NOT NULL
+      GROUP BY participant_name, participant_phone, contact_pushname
+      ORDER BY last_message_time DESC
+    `;
+    
+    const result = await db.request()
+      .input('session_name', sql.VarChar, sessionName)
+      .query(query);
+    
+    res.json(createResponse(true, result.recordset, `Found ${result.recordset.length} participants`));
+  } catch (error) {
+    console.error('Error fetching participants:', error);
+    res.status(500).json(createResponse(false, null, 'Error fetching participants'));
   }
 });
 
